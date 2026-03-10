@@ -22,7 +22,7 @@ from prepare import (
 # Network architecture
 HIDDEN_SIZE = 256           # hidden layer width
 NUM_LAYERS = 3              # number of hidden layers
-ACTIVATION = "tanh"         # activation function: "tanh" or "relu"
+ACTIVATION = "relu"         # activation function: "tanh" or "relu"
 SEPARATE_NETWORKS = True    # separate actor and critic networks
 
 # PPO
