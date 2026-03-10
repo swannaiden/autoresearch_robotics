@@ -20,12 +20,13 @@ from prepare import (
 # ---------------------------------------------------------------------------
 
 # Network architecture
-HIDDEN_SIZE = 64            # hidden layer width
+HIDDEN_SIZE = 128           # hidden layer width
 NUM_LAYERS = 2              # number of hidden layers
 ACTIVATION = "tanh"         # activation function: "tanh" or "relu"
+SEPARATE_NETWORKS = True    # separate actor and critic networks
 
 # PPO
-NUM_ENVS = 8               # number of parallel environments
+NUM_ENVS = 16              # number of parallel environments
 NUM_STEPS = 128             # rollout steps per env before each update
 NUM_MINIBATCHES = 4         # number of minibatches per update
 UPDATE_EPOCHS = 4           # number of passes over rollout data per update
@@ -35,7 +36,7 @@ CLIP_EPS = 0.2              # PPO clipping epsilon
 ENT_COEF = 0.01             # entropy bonus coefficient
 VF_COEF = 0.5               # value loss coefficient
 MAX_GRAD_NORM = 0.5         # max gradient norm for clipping
-LEARNING_RATE = 2.5e-4      # learning rate
+LEARNING_RATE = 3e-4        # learning rate
 ANNEAL_LR = True            # whether to linearly anneal LR to 0
 
 # ---------------------------------------------------------------------------
@@ -52,39 +53,54 @@ def make_activation(name):
 
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_size=64, num_layers=2, activation="tanh"):
+    def __init__(self, obs_dim, act_dim, hidden_size=64, num_layers=2, activation="tanh",
+                 separate=False):
         super().__init__()
         Act = make_activation(activation)
 
-        # Build shared feature extractor (could also be separate)
-        layers = []
-        in_dim = obs_dim
-        for _ in range(num_layers):
-            layers.append(nn.Linear(in_dim, hidden_size))
-            layers.append(Act())
-            in_dim = hidden_size
+        def _build_net(in_dim, hidden_size, num_layers):
+            layers = []
+            d = in_dim
+            for _ in range(num_layers):
+                layers.append(nn.Linear(d, hidden_size))
+                layers.append(Act())
+                d = hidden_size
+            return nn.Sequential(*layers)
 
-        self.feature_net = nn.Sequential(*layers)
+        if separate:
+            self.actor_net = _build_net(obs_dim, hidden_size, num_layers)
+            self.critic_net = _build_net(obs_dim, hidden_size, num_layers)
+            self.feature_net = None
+        else:
+            self.feature_net = _build_net(obs_dim, hidden_size, num_layers)
+            self.actor_net = None
+            self.critic_net = None
+
         self.policy_head = nn.Linear(hidden_size, act_dim)
         self.value_head = nn.Linear(hidden_size, 1)
 
-        # Orthogonal initialization (standard for PPO)
         self._init_weights()
 
     def _init_weights(self):
-        for module in self.feature_net:
-            if isinstance(module, nn.Linear):
-                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
-                nn.init.zeros_(module.bias)
+        for net in [self.feature_net, self.actor_net, self.critic_net]:
+            if net is not None:
+                for module in net:
+                    if isinstance(module, nn.Linear):
+                        nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                        nn.init.zeros_(module.bias)
         nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
         nn.init.zeros_(self.policy_head.bias)
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
         nn.init.zeros_(self.value_head.bias)
 
     def forward(self, x):
-        features = self.feature_net(x)
-        logits = self.policy_head(features)
-        value = self.value_head(features).squeeze(-1)
+        if self.feature_net is not None:
+            features = self.feature_net(x)
+            logits = self.policy_head(features)
+            value = self.value_head(features).squeeze(-1)
+        else:
+            logits = self.policy_head(self.actor_net(x))
+            value = self.value_head(self.critic_net(x)).squeeze(-1)
         return logits, value
 
     def get_action_and_value(self, obs, action=None):
@@ -122,7 +138,8 @@ print(f"Environment: {ENV_NAME}")
 print(f"Obs dim: {obs_dim}, Act dim: {act_dim}")
 
 # Create model and optimizer
-model = ActorCritic(obs_dim, act_dim, HIDDEN_SIZE, NUM_LAYERS, ACTIVATION).to(device)
+model = ActorCritic(obs_dim, act_dim, HIDDEN_SIZE, NUM_LAYERS, ACTIVATION,
+                    separate=SEPARATE_NETWORKS).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, eps=1e-5)
 
 num_params = sum(p.numel() for p in model.parameters())
