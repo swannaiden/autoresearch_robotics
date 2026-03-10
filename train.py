@@ -27,8 +27,8 @@ SEPARATE_NETWORKS = True    # separate actor and critic networks
 
 # PPO
 NUM_ENVS = 16              # number of parallel environments
-NUM_STEPS = 256             # rollout steps per env before each update
-NUM_MINIBATCHES = 8         # number of minibatches per update
+NUM_STEPS = 512             # rollout steps per env before each update
+NUM_MINIBATCHES = 16        # number of minibatches per update
 UPDATE_EPOCHS = 10          # number of passes over rollout data per update
 GAMMA = 0.999               # discount factor
 GAE_LAMBDA = 0.98           # GAE lambda
