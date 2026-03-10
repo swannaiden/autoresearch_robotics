@@ -36,7 +36,7 @@ CLIP_EPS = 0.2              # PPO clipping epsilon
 ENT_COEF = 0.01             # entropy bonus coefficient
 VF_COEF = 0.5               # value loss coefficient
 MAX_GRAD_NORM = 0.5         # max gradient norm for clipping
-LEARNING_RATE = 3e-4        # learning rate
+LEARNING_RATE = 5e-4        # learning rate
 ANNEAL_LR = True            # whether to linearly anneal LR to 0
 
 # ---------------------------------------------------------------------------
