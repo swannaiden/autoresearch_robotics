@@ -22,7 +22,7 @@ from prepare import (
 # Network architecture
 HIDDEN_SIZE = 256           # hidden layer width
 NUM_LAYERS = 3              # number of hidden layers
-ACTIVATION = "tanh"         # activation function: "tanh" or "relu"
+ACTIVATION = "leaky_relu"   # activation function: "tanh", "relu", or "leaky_relu"
 SEPARATE_NETWORKS = True    # separate actor and critic networks
 
 # PPO
@@ -48,6 +48,8 @@ def make_activation(name):
         return nn.Tanh
     elif name == "relu":
         return nn.ReLU
+    elif name == "leaky_relu":
+        return nn.LeakyReLU
     else:
         raise ValueError(f"Unknown activation: {name}")
 
