@@ -63,6 +63,7 @@ class ActorCritic(nn.Module):
             d = in_dim
             for _ in range(num_layers):
                 layers.append(nn.Linear(d, hidden_size))
+                layers.append(nn.LayerNorm(hidden_size))
                 layers.append(Act())
                 d = hidden_size
             return nn.Sequential(*layers)
