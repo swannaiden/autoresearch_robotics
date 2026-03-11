@@ -1,14 +1,16 @@
 """
-Autoresearch PPO training script. Single-file.
+Autoresearch PPO training script for CarRacing-v3. Single-file.
+CNN policy with continuous actions.
 Usage: uv run train.py
 """
 
 import time
+import copy
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Categorical
+from torch.distributions import Normal
 
 from prepare import (
     TIME_BUDGET, EVAL_EPISODES, ENV_NAME, SEED,
@@ -20,107 +22,134 @@ from prepare import (
 # ---------------------------------------------------------------------------
 
 # Network architecture
-HIDDEN_SIZE = 256           # hidden layer width
-NUM_LAYERS = 3              # number of hidden layers
-ACTIVATION = "gelu"         # activation function: "tanh", "relu", "leaky_relu", or "gelu"
-SEPARATE_NETWORKS = True    # separate actor and critic networks
+HIDDEN_SIZE = 256           # FC layer width after CNN
+ACTIVATION = "relu"         # activation for CNN layers
 
 # PPO
-NUM_ENVS = 16              # number of parallel environments
-NUM_STEPS = 256             # rollout steps per env before each update
-NUM_MINIBATCHES = 8         # number of minibatches per update
-UPDATE_EPOCHS = 10          # number of passes over rollout data per update
-GAMMA = 0.999               # discount factor
-GAE_LAMBDA = 0.98           # GAE lambda
+NUM_ENVS = 8               # number of parallel environments (images are heavier)
+NUM_STEPS = 128             # rollout steps per env before each update
+NUM_MINIBATCHES = 4         # number of minibatches per update
+UPDATE_EPOCHS = 4           # number of passes over rollout data per update
+GAMMA = 0.99                # discount factor
+GAE_LAMBDA = 0.95           # GAE lambda
 CLIP_EPS = 0.2              # PPO clipping epsilon
-ENT_COEF = 0.005            # entropy bonus coefficient
-VF_COEF = 1.0               # value loss coefficient
+ENT_COEF = 0.01             # entropy bonus coefficient
+VF_COEF = 0.5               # value loss coefficient
 MAX_GRAD_NORM = 0.5         # max gradient norm for clipping
-LEARNING_RATE = 5e-4        # learning rate
+LEARNING_RATE = 3e-4        # learning rate
 ANNEAL_LR = True            # whether to linearly anneal LR to 0
 
 # ---------------------------------------------------------------------------
-# Actor-Critic Network
+# Observation preprocessing
 # ---------------------------------------------------------------------------
 
-def make_activation(name):
-    if name == "tanh":
-        return nn.Tanh
-    elif name == "relu":
-        return nn.ReLU
-    elif name == "leaky_relu":
-        return nn.LeakyReLU
-    elif name == "gelu":
-        return nn.GELU
-    else:
-        raise ValueError(f"Unknown activation: {name}")
+def preprocess_obs(obs):
+    """Convert (B, 96, 96, 3) uint8 -> (B, 3, 96, 96) float32 in [0,1]."""
+    if isinstance(obs, np.ndarray):
+        # Transpose HWC -> CHW and normalize
+        obs = obs.astype(np.float32) / 255.0
+        obs = np.transpose(obs, (0, 3, 1, 2))
+    return obs
 
+
+# ---------------------------------------------------------------------------
+# Actor-Critic Network (CNN + continuous actions)
+# ---------------------------------------------------------------------------
 
 class ActorCritic(nn.Module):
-    def __init__(self, obs_dim, act_dim, hidden_size=64, num_layers=2, activation="tanh",
-                 separate=False):
+    def __init__(self, act_dim, hidden_size=256):
         super().__init__()
-        Act = make_activation(activation)
 
-        def _build_net(in_dim, hidden_size, num_layers):
-            layers = []
-            d = in_dim
-            for _ in range(num_layers):
-                layers.append(nn.Linear(d, hidden_size))
-                layers.append(nn.LayerNorm(hidden_size))
-                layers.append(Act())
-                d = hidden_size
-            return nn.Sequential(*layers)
+        # CNN encoder: (3, 96, 96) -> features
+        self.cnn = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=8, stride=4),  # -> (32, 23, 23)
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2),  # -> (64, 10, 10)
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1),  # -> (64, 8, 8)
+            nn.ReLU(),
+            nn.Flatten(),  # -> 64*8*8 = 4096
+        )
 
-        if separate:
-            self.actor_net = _build_net(obs_dim, hidden_size, num_layers)
-            self.critic_net = _build_net(obs_dim, hidden_size, num_layers)
-            self.feature_net = None
-        else:
-            self.feature_net = _build_net(obs_dim, hidden_size, num_layers)
-            self.actor_net = None
-            self.critic_net = None
+        # Compute CNN output size
+        cnn_out_size = 64 * 8 * 8  # 4096
 
-        self.policy_head = nn.Linear(hidden_size, act_dim)
+        # Shared feature layer
+        self.feature_fc = nn.Sequential(
+            nn.Linear(cnn_out_size, hidden_size),
+            nn.ReLU(),
+        )
+
+        # Policy head: outputs mean for each action dimension
+        self.policy_mean = nn.Linear(hidden_size, act_dim)
+        # Learnable log standard deviation
+        self.policy_log_std = nn.Parameter(torch.zeros(act_dim))
+
+        # Value head
         self.value_head = nn.Linear(hidden_size, 1)
 
         self._init_weights()
 
     def _init_weights(self):
-        for net in [self.feature_net, self.actor_net, self.critic_net]:
-            if net is not None:
-                for module in net:
-                    if isinstance(module, nn.Linear):
-                        nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
-                        nn.init.zeros_(module.bias)
-        nn.init.orthogonal_(self.policy_head.weight, gain=0.01)
-        nn.init.zeros_(self.policy_head.bias)
+        # Orthogonal init for CNN
+        for module in self.cnn:
+            if isinstance(module, nn.Conv2d):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.zeros_(module.bias)
+
+        # Feature FC
+        for module in self.feature_fc:
+            if isinstance(module, nn.Linear):
+                nn.init.orthogonal_(module.weight, gain=np.sqrt(2))
+                nn.init.zeros_(module.bias)
+
+        # Policy head (small init for exploration)
+        nn.init.orthogonal_(self.policy_mean.weight, gain=0.01)
+        nn.init.zeros_(self.policy_mean.bias)
+
+        # Value head
         nn.init.orthogonal_(self.value_head.weight, gain=1.0)
         nn.init.zeros_(self.value_head.bias)
 
+    def _encode(self, x):
+        """Shared CNN + FC encoding."""
+        cnn_features = self.cnn(x)
+        return self.feature_fc(cnn_features)
+
     def forward(self, x):
-        if self.feature_net is not None:
-            features = self.feature_net(x)
-            logits = self.policy_head(features)
-            value = self.value_head(features).squeeze(-1)
-        else:
-            logits = self.policy_head(self.actor_net(x))
-            value = self.value_head(self.critic_net(x)).squeeze(-1)
-        return logits, value
+        features = self._encode(x)
+        action_mean = self.policy_mean(features)
+        value = self.value_head(features).squeeze(-1)
+        return action_mean, value
 
     def get_action_and_value(self, obs, action=None):
-        logits, value = self.forward(obs)
-        dist = Categorical(logits=logits)
+        action_mean, value = self.forward(obs)
+        action_std = self.policy_log_std.exp()
+        dist = Normal(action_mean, action_std)
+
         if action is None:
             action = dist.sample()
-        log_prob = dist.log_prob(action)
-        entropy = dist.entropy()
+
+        log_prob = dist.log_prob(action).sum(-1)  # sum across action dims
+        entropy = dist.entropy().sum(-1)
         return action, log_prob, entropy, value
 
     def get_deterministic_action(self, obs):
-        """For evaluation: pick the greedy action."""
-        logits, _ = self.forward(obs)
-        return logits.argmax(dim=-1)
+        """For evaluation: use the mean action."""
+        action_mean, _ = self.forward(obs)
+        return action_mean
+
+
+def postprocess_action(action_np):
+    """Clamp actions to valid CarRacing ranges.
+    Action space: [steering, gas, brake]
+    steering: [-1, 1], gas: [0, 1], brake: [0, 1]
+    """
+    action_np = np.clip(action_np, -1.0, 1.0)
+    # Gas and brake should be [0, 1]
+    action_np[..., 1] = np.clip(action_np[..., 1], 0.0, 1.0)
+    action_np[..., 2] = np.clip(action_np[..., 2], 0.0, 1.0)
+    return action_np
 
 
 # ---------------------------------------------------------------------------
@@ -137,26 +166,25 @@ print(f"Device: {device}")
 
 # Create environments
 envs = make_vec_env(ENV_NAME, NUM_ENVS, SEED)
-obs_dim = envs.single_observation_space.shape[0]
-act_dim = envs.single_action_space.n
+act_dim = envs.single_action_space.shape[0]  # 3 for CarRacing
 print(f"Environment: {ENV_NAME}")
-print(f"Obs dim: {obs_dim}, Act dim: {act_dim}")
+print(f"Obs shape: {envs.single_observation_space.shape}, Act dim: {act_dim}")
 
 # Create model and optimizer
-model = ActorCritic(obs_dim, act_dim, HIDDEN_SIZE, NUM_LAYERS, ACTIVATION,
-                    separate=SEPARATE_NETWORKS).to(device)
+model = ActorCritic(act_dim, HIDDEN_SIZE).to(device)
 optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE, eps=1e-5)
 
 num_params = sum(p.numel() for p in model.parameters())
 print(f"Parameters: {num_params:,}")
 
-# Rollout buffer
+# Rollout buffer — obs stored as preprocessed (3, 96, 96), continuous actions (3,)
 batch_size = NUM_ENVS * NUM_STEPS
 assert batch_size % NUM_MINIBATCHES == 0
 buffer = RolloutBuffer(
     NUM_STEPS, NUM_ENVS,
-    obs_shape=(obs_dim,),
-    discrete=True,
+    obs_shape=(3, 96, 96),
+    act_shape=(act_dim,),
+    discrete=False,
 )
 
 print(f"Time budget: {TIME_BUDGET}s")
@@ -166,15 +194,16 @@ print(f"Batch size: {batch_size} ({NUM_ENVS} envs x {NUM_STEPS} steps)")
 # Training loop
 # ---------------------------------------------------------------------------
 
-import copy
 ema_model = copy.deepcopy(model)
 ema_decay = 0.999
 
-obs, _ = envs.reset(seed=SEED)
+obs_raw, _ = envs.reset(seed=SEED)
+obs = preprocess_obs(obs_raw)  # (NUM_ENVS, 3, 96, 96)
+
 total_training_time = 0.0
 update = 0
 total_timesteps = 0
-episode_returns = []  # track completed episode returns during training
+episode_returns = []
 
 # For tracking episode returns from vectorized envs
 running_returns = np.zeros(NUM_ENVS, dtype=np.float64)
@@ -200,7 +229,10 @@ while True:
             log_prob_np = log_prob.cpu().numpy()
             value_np = value.cpu().numpy()
 
-            next_obs, reward, terminated, truncated, infos = envs.step(action_np)
+            # Post-process actions for environment
+            action_env = postprocess_action(action_np)
+
+            next_obs_raw, reward, terminated, truncated, infos = envs.step(action_env)
             done = np.logical_or(terminated, truncated)
 
             # Track episode returns
@@ -210,8 +242,9 @@ while True:
                     episode_returns.append(running_returns[i])
                     running_returns[i] = 0.0
 
+            # Store preprocessed obs and raw (unclamped) actions for PPO
             buffer.store(step, obs, action_np, log_prob_np, value_np, reward, done)
-            obs = next_obs
+            obs = preprocess_obs(next_obs_raw)
 
         # Bootstrap value for GAE
         last_obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=device)
@@ -233,7 +266,7 @@ while True:
             mb_obs, mb_actions, mb_old_log_probs, mb_advantages, mb_returns, mb_old_values = batch
 
             mb_obs_t = torch.as_tensor(mb_obs, dtype=torch.float32, device=device)
-            mb_actions_t = torch.as_tensor(mb_actions, dtype=torch.long, device=device)
+            mb_actions_t = torch.as_tensor(mb_actions, dtype=torch.float32, device=device)
             mb_old_log_probs_t = torch.as_tensor(mb_old_log_probs, dtype=torch.float32, device=device)
             mb_advantages_t = torch.as_tensor(mb_advantages, dtype=torch.float32, device=device)
             mb_returns_t = torch.as_tensor(mb_returns, dtype=torch.float32, device=device)
@@ -250,7 +283,7 @@ while True:
             pg_loss2 = -mb_advantages_t * torch.clamp(ratio, 1 - CLIP_EPS, 1 + CLIP_EPS)
             pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
-            # Value loss (clipped)
+            # Value loss
             vf_loss = 0.5 * ((new_value - mb_returns_t) ** 2).mean()
 
             # Entropy loss
@@ -316,9 +349,13 @@ ema_model.eval()
 
 def policy_fn(obs):
     with torch.no_grad():
-        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        # Single obs: (96, 96, 3) -> (1, 3, 96, 96)
+        obs_p = obs.astype(np.float32) / 255.0
+        obs_p = np.transpose(obs_p, (2, 0, 1))
+        obs_t = torch.as_tensor(obs_p, dtype=torch.float32, device=device).unsqueeze(0)
         action = ema_model.get_deterministic_action(obs_t)
-    return action.item()
+    action_np = action.squeeze(0).cpu().numpy()
+    return postprocess_action(action_np)
 
 print("Evaluating...")
 avg_return = evaluate_return(policy_fn, ENV_NAME, EVAL_EPISODES)

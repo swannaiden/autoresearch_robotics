@@ -11,8 +11,8 @@ To set up a new experiment, work with the user to:
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `README.md` — repository context.
    - `prepare.py` — fixed constants, environment utilities, evaluation, rollout buffer. Do not modify.
-   - `train.py` — the file you modify. Actor-critic network, PPO algorithm, training loop.
-4. **Verify environment works**: Run `uv run python -c "import gymnasium; env = gymnasium.make('LunarLander-v3'); print('OK')"` to check that the environment is available.
+   - `train.py` — the file you modify. CNN actor-critic network, PPO algorithm, training loop.
+4. **Verify environment works**: Run `uv run python -c "import gymnasium; env = gymnasium.make('CarRacing-v3'); print('OK')"` to check that the environment is available.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -20,10 +20,10 @@ Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment runs on a single machine (GPU optional — PPO on LunarLander runs fine on CPU). The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup). You launch it simply as: `uv run train.py`.
+Each experiment runs on a single machine (GPU optional — PPO on CarRacing benefits from GPU for CNN inference). The training script runs for a **fixed time budget of 5 minutes** (wall clock training time, excluding startup). You launch it simply as: `uv run train.py`.
 
 **What you CAN do:**
-- Modify `train.py` — this is the only file you edit. Everything is fair game: network architecture (width, depth, activation functions, separate vs shared backbone), PPO hyperparameters (clipping, entropy, learning rate, batch sizes, discount), training loop structure, observation normalization, reward scaling, exploration strategies, etc.
+- Modify `train.py` — this is the only file you edit. Everything is fair game: CNN architecture (depth, width, kernel sizes, strides), FC layers, activation functions, continuous action distribution (Normal, Beta, squashed), PPO hyperparameters (clipping, entropy, learning rate, batch sizes, discount), observation preprocessing (grayscale, frame stacking, cropping), reward scaling, exploration strategies, etc.
 
 **What you CANNOT do:**
 - Modify `prepare.py`. It is read-only. It contains the fixed evaluation, environment creation, rollout buffer, and training constants (time budget, eval episodes, etc).
@@ -86,7 +86,7 @@ d4e5f6g	0.000000	0.0	crash	invalid batch size config
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar9`).
+The experiment runs on a dedicated branch (e.g. `autoresearch/carracing`).
 
 LOOP FOREVER:
 
@@ -109,8 +109,11 @@ The idea is that you are a completely autonomous researcher trying things out. I
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. Do NOT ask "should I keep going?" or "is this a good stopping point?". The human might be asleep, or gone from a computer and expects you to continue working *indefinitely* until you are manually stopped. You are autonomous. If you run out of ideas, think harder — re-read the in-scope files for new angles, try combining previous near-misses, try more radical architectural changes. The loop runs until the human interrupts you, period.
 
 Some ideas to explore (non-exhaustive):
-- Network architecture: width, depth, separate actor/critic networks, skip connections
-- Activation functions: tanh, relu, leaky relu, elu, gelu
+- CNN architecture: kernel sizes, strides, number of filters, depth
+- Observation preprocessing: grayscale conversion, frame stacking, cropping bottom bar
+- Activation functions: ReLU, LeakyReLU, ELU, GELU
+- Separate actor/critic CNN backbones vs shared
+- Action distribution: Normal vs Beta distribution, learned vs fixed std
 - Observation normalization / reward scaling
 - PPO hyperparameters: clip epsilon, entropy coefficient, number of epochs, minibatch size
 - Learning rate schedules beyond linear annealing
@@ -118,4 +121,4 @@ Some ideas to explore (non-exhaustive):
 - Larger/smaller rollout buffers (NUM_STEPS)
 - More/fewer parallel environments
 - Value function clipping
-- Gradient accumulation strategies
+- Frame skip / action repeat

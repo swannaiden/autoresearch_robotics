@@ -21,7 +21,7 @@ import gymnasium as gym
 
 TIME_BUDGET = 300          # training time budget in seconds (5 minutes)
 EVAL_EPISODES = 100        # number of episodes for evaluation
-ENV_NAME = "LunarLander-v3"  # benchmark environment
+ENV_NAME = "CarRacing-v3"  # benchmark environment
 SEED = 42
 
 # ---------------------------------------------------------------------------
