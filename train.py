@@ -166,6 +166,10 @@ print(f"Batch size: {batch_size} ({NUM_ENVS} envs x {NUM_STEPS} steps)")
 # Training loop
 # ---------------------------------------------------------------------------
 
+import copy
+ema_model = copy.deepcopy(model)
+ema_decay = 0.999
+
 obs, _ = envs.reset(seed=SEED)
 total_training_time = 0.0
 update = 0
@@ -259,6 +263,11 @@ while True:
             nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer.step()
 
+            # Update EMA
+            with torch.no_grad():
+                for ema_p, p in zip(ema_model.parameters(), model.parameters()):
+                    ema_p.mul_(ema_decay).add_(p, alpha=1 - ema_decay)
+
             total_pg_loss += pg_loss.item()
             total_vf_loss += vf_loss.item()
             total_ent_loss += ent_loss.item()
@@ -300,15 +309,15 @@ print()  # newline after \r training log
 envs.close()
 
 # ---------------------------------------------------------------------------
-# Final evaluation
+# Final evaluation (using EMA model)
 # ---------------------------------------------------------------------------
 
-model.eval()
+ema_model.eval()
 
 def policy_fn(obs):
     with torch.no_grad():
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-        action = model.get_deterministic_action(obs_t)
+        action = ema_model.get_deterministic_action(obs_t)
     return action.item()
 
 print("Evaluating...")
